@@ -13,21 +13,53 @@ exports.handler = async function(event, context) {
   }
 
   try {
-    const params = event.queryStringParameters || {};
-    const apiPath = params.path || "/matches";
-    const url = `${FD_BASE}${apiPath}`;
-    console.log("Fetching:", url);
+    // Get today's date in YYYY-MM-DD
+    const today = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/London" });
 
-    const response = await fetch(url, {
-      headers: { "X-Auth-Token": FD_TOKEN },
-    });
+    // All competition codes on the free tier
+    const competitions = [
+      "PL","ELC","CL","EL","PD","BL1","SA","FL1","DED","PPL","BSA","WC"
+    ];
 
-    const data = await response.json();
+    const competitionNames = {
+      "PL":"Premier League","ELC":"Championship","CL":"Champions League",
+      "EL":"Europa League","PD":"La Liga","BL1":"Bundesliga","SA":"Serie A",
+      "FL1":"Ligue 1","DED":"Eredivisie","PPL":"Primeira Liga",
+      "BSA":"Brasileirao","WC":"World Cup"
+    };
+
+    // Fetch from each competition in parallel
+    const results = await Promise.allSettled(
+      competitions.map(async (code) => {
+        const url = `${FD_BASE}/competitions/${code}/matches?dateFrom=${today}&dateTo=${today}`;
+        const res = await fetch(url, {
+          headers: { "X-Auth-Token": FD_TOKEN },
+        });
+        if (!res.ok) return [];
+        const data = await res.json();
+        const matches = data?.matches || [];
+        return matches.map(m => ({
+          ...m,
+          competition: {
+            ...m.competition,
+            name: competitionNames[code] || m.competition?.name,
+            code,
+          },
+        }));
+      })
+    );
+
+    const allMatches = results
+      .filter(r => r.status === "fulfilled")
+      .flatMap(r => r.value)
+      .filter(m => m && m.homeTeam);
+
+    console.log(`Found ${allMatches.length} matches today across all competitions`);
 
     return {
-      statusCode: response.status,
+      statusCode: 200,
       headers,
-      body: JSON.stringify(data),
+      body: JSON.stringify({ matches: allMatches }),
     };
 
   } catch (error) {
