@@ -1016,9 +1016,8 @@ function renderPicks() {
 // INTERACTIONS
 // ═══════════════════════════════════════════════════════════════════
 function toggleCard(id) {
-  openState[id] = openState[id] === false ? true : false;
+  openState[id] = !openState[id];
   renderPicks();
-  // Restore scroll position roughly
 }
 function setTab(e, id, tab) {
   e.stopPropagation();
