@@ -4,7 +4,7 @@ exports.handler = async function(event, context) {
   const RAPID_BASE = "https://sofascore.p.rapidapi.com";
   const FD_TOKEN   = "faf76b5f8a1f40da96253222b4c306a8";
   const FD_BASE    = "https://api.football-data.org/v4";
-  const ODDS_KEY   = "060c8f90c05190fb13af0cb9551e1ec2";
+  const ODDS_KEY   = "053907056f68e2408aa33038cc56be7c";
   const ODDS_BASE  = "https://api.the-odds-api.com/v4";
 
   const headers = {
