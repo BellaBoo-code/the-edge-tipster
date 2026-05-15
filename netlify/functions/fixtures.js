@@ -126,15 +126,31 @@ exports.handler = async function(event, context) {
 
     // ── 4. LIVE STANDINGS ─────────────────────────────────────────
     const standingsMap = {};
-    await Promise.allSettled(FD_COMPS.map(async code => {
-      // No season filter - let football-data.org return current season automatically
+    // Fetch domestic leagues FIRST, then European — domestic stats take priority
+    const DOMESTIC_COMPS = ["PL","ELC","PD","BL1","SA","FL1","DED","PPL"];
+    const EURO_COMPS = ["CL","EL","ECL"];
+
+    // Helper to add to standings map — only overwrites if new entry has more games played
+    function addToMap(name, short, stats) {
+      const key = name.toLowerCase();
+      const keyShort = short.toLowerCase();
+      const existing = standingsMap[key];
+      // Always prefer the entry with more games played (domestic > european)
+      if (!existing || stats.played > existing.played) {
+        standingsMap[key] = stats;
+        standingsMap[keyShort] = stats;
+      }
+    }
+
+    // Fetch domestic first
+    await Promise.allSettled(DOMESTIC_COMPS.map(async code => {
       const data = await fdGet(`/competitions/${code}/standings`);
       if (!data) return;
       const table = data.standings?.[0]?.table || [];
       table.forEach(entry => {
         const name  = entry.team?.name || "";
         const short = entry.team?.shortName || name;
-        const stats = {
+        addToMap(name, short, {
           position: entry.position,
           played:   entry.playedGames,
           won:      entry.won,
@@ -145,9 +161,30 @@ exports.handler = async function(event, context) {
           gd:       entry.goalDifference,
           points:   entry.points,
           form:     (entry.form || "").split(",").filter(Boolean).slice(-5),
-        };
-        standingsMap[name.toLowerCase()]  = stats;
-        standingsMap[short.toLowerCase()] = stats;
+        });
+      });
+    }));
+
+    // Then fetch European — only adds if team not already in map with more games
+    await Promise.allSettled(EURO_COMPS.map(async code => {
+      const data = await fdGet(`/competitions/${code}/standings`);
+      if (!data) return;
+      const table = data.standings?.[0]?.table || [];
+      table.forEach(entry => {
+        const name  = entry.team?.name || "";
+        const short = entry.team?.shortName || name;
+        addToMap(name, short, {
+          position: entry.position,
+          played:   entry.playedGames,
+          won:      entry.won,
+          drawn:    entry.draw,
+          lost:     entry.lost,
+          gf:       entry.goalsFor,
+          ga:       entry.goalsAgainst,
+          gd:       entry.goalDifference,
+          points:   entry.points,
+          form:     (entry.form || "").split(",").filter(Boolean).slice(-5),
+        });
       });
     }));
     debug.steps.push(`teams with stats: ${Object.keys(standingsMap).length / 2}`);
