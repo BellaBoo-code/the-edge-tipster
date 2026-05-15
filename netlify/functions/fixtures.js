@@ -55,6 +55,7 @@ exports.handler = async function(event, context) {
   try {
     const today = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/London" });
     const dateFormatted = today.replace(/-/g, ""); // YYYYMMDD format
+    console.log("Date formatted:", dateFormatted, "Today:", today);
 
     // ── 1. TODAY'S FIXTURES ───────────────────────────────────────
     let allFixtures = [];
@@ -101,15 +102,24 @@ exports.handler = async function(event, context) {
 
     const fixtures = allFixtures
       .filter(m => {
-        // Check by ID first, then by name
-        const lid = m.league?.id || m.leagueId || m.competition?.id;
+        // leagueId is the correct field name for this API
+        const lid = m.leagueId || m.league?.id || m.competition?.id;
         const lname = (m.league?.name || m.leagueName || m.competition?.name || "").toLowerCase();
         const idMatch = leagueIds.has(lid) || leagueIds.has(parseInt(lid));
         const nameMatch = leagueNames.some(n => lname.includes(n));
         if (!idMatch && !nameMatch) return false;
+        // Check date matches today using the time field
+        if (m.time) {
+          const parts = m.time.split(" ");
+          if (parts.length === 2) {
+            const [d,mo,y] = parts[0].split(".");
+            const matchDate = `${y}-${mo}-${d}`;
+            if (matchDate !== today) return false;
+          }
+        }
         // Exclude finished games
-        const status = m.status?.short || m.status || m.statusShort || "";
-        if (status === "FT" || status === "AET" || status === "PEN") return false;
+        const status = (m.status?.short || m.status || m.statusShort || "").toUpperCase();
+        if (status === "FT" || status === "AET" || status === "PEN" || status === "FINISHED") return false;
         // Exclude women/youth
         if (lname.includes("women") || lname.includes("u21") || lname.includes("u18") || lname.includes("youth")) return false;
         return true;
