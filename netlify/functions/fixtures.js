@@ -15,6 +15,18 @@ exports.handler = async function(event, context) {
     return { statusCode: 200, headers, body: "" };
   }
 
+  // Leagues/keywords to exclude
+  const EXCLUDE = [
+    "women", "u18", "u21", "u23", "u17", "u16", "u15", "youth",
+    "reserve", "reserves", "b team", "friendly", "friendlies",
+    "indoor", "futsal", "beach", "esport"
+  ];
+
+  function isExcluded(leagueName) {
+    const n = (leagueName || "").toLowerCase();
+    return EXCLUDE.some(x => n.includes(x));
+  }
+
   async function sofaGet(path) {
     const r = await fetch(`${RAPID_BASE}${path}`, {
       headers: {
@@ -33,112 +45,147 @@ exports.handler = async function(event, context) {
   try {
     const today = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/London" });
 
-    // Fetch raw response and expose structure for debugging
+    // Fetch today's football fixtures from Sofascore
     const raw = await sofaGet(`/tournaments/get-scheduled-events?categoryId=1&date=${today}`);
 
-    // Log top level keys so we can see the structure
-    const topKeys = Object.keys(raw || {});
-    const debugInfo = {
-      topKeys,
-      date: today,
-    };
+    // Response comes back as raw.events (flat list)
+    const events = raw.events || [];
+    console.log(`Raw events: ${events.length}`);
 
-    // Try every possible path to find fixtures
-    let allMatches = [];
+    // Filter and map to our format
+    const allMatches = events
+      .filter(e => {
+        // Only not-started games
+        if (e.status?.type !== "notstarted") return false;
 
-    // Try path 1: raw.uniqueTournaments
-    if (raw.uniqueTournaments) {
-      debugInfo.path = "uniqueTournaments";
-      debugInfo.count = raw.uniqueTournaments.length;
-      for (const t of raw.uniqueTournaments) {
-        const tName = t.tournament?.name || t.name || "Football";
-        const events = t.events || t.scheduledEvents || [];
-        for (const e of events) {
-          allMatches.push({ src: "p1", league: tName, e });
+        // Check date is today UK time
+        const ts = e.startTimestamp || 0;
+        if (ts) {
+          const d = new Date(ts * 1000).toLocaleDateString("en-CA", { timeZone: "Europe/London" });
+          if (d !== today) return false;
         }
-      }
-    }
 
-    // Try path 2: raw.sportItem
-    if (raw.sportItem?.tournaments) {
-      debugInfo.path2 = "sportItem.tournaments";
-      debugInfo.count2 = raw.sportItem.tournaments.length;
-      for (const t of raw.sportItem.tournaments) {
-        const tName = t.tournament?.name || t.name || "Football";
-        const events = t.events || t.scheduledEvents || [];
-        for (const e of events) {
-          allMatches.push({ src: "p2", league: tName, e });
-        }
-      }
-    }
+        // Exclude women's, youth, etc
+        const leagueName = e.tournament?.name || "";
+        if (isExcluded(leagueName)) return false;
 
-    // Try path 3: raw.events (flat list)
-    if (raw.events) {
-      debugInfo.path3 = "events";
-      debugInfo.count3 = raw.events.length;
-      for (const e of raw.events) {
-        allMatches.push({ src: "p3", league: e.tournament?.name || "Football", e });
-      }
-    }
+        return true;
+      })
+      .map(e => ({
+        id: e.id,
+        home: e.homeTeam?.shortName || e.homeTeam?.name || "Home",
+        away: e.awayTeam?.shortName || e.awayTeam?.name || "Away",
+        homeFull: e.homeTeam?.name || "",
+        awayFull: e.awayTeam?.name || "",
+        league: e.tournament?.name || "Football",
+        country: e.tournament?.category?.name || "",
+        kickoff: e.startTimestamp
+          ? new Date(e.startTimestamp * 1000).toLocaleTimeString("en-GB", {
+              hour: "2-digit", minute: "2-digit", timeZone: "Europe/London"
+            })
+          : "TBC",
+        ts: e.startTimestamp || 0,
+        liveOdds: {},
+        hasOdds: false,
+        hasStats: false,
+        utcDate: e.startTimestamp
+          ? new Date(e.startTimestamp * 1000).toISOString()
+          : new Date().toISOString(),
+        homeTeam: { name: e.homeTeam?.shortName || e.homeTeam?.name || "Home" },
+        awayTeam: { name: e.awayTeam?.shortName || e.awayTeam?.name || "Away" },
+        competition: { name: e.tournament?.name || "Football", code: "" },
+      }))
+      .filter(m => m.home !== "Home" && m.away !== "Away")
+      .sort((a, b) => a.ts - b.ts);
 
-    // Try path 4: raw itself is array
-    if (Array.isArray(raw)) {
-      debugInfo.path4 = "raw array";
-      debugInfo.count4 = raw.length;
-      for (const e of raw) {
-        allMatches.push({ src: "p4", league: e.tournament?.name || "Football", e });
-      }
-    }
+    console.log(`Filtered fixtures: ${allMatches.length}`);
 
-    // Show first item of raw for inspection
-    debugInfo.rawSample = JSON.stringify(raw).slice(0, 500);
-
-    // Map to our format
-    const fixtures = allMatches.map(({ league, e }) => ({
-      id: e.id,
-      home: e.homeTeam?.shortName || e.homeTeam?.name || "Home",
-      away: e.awayTeam?.shortName || e.awayTeam?.name || "Away",
-      homeFull: e.homeTeam?.name || "",
-      awayFull: e.awayTeam?.name || "",
-      league,
-      country: e.tournament?.category?.name || "",
-      kickoff: e.startTimestamp
-        ? new Date(e.startTimestamp * 1000).toLocaleTimeString("en-GB", {
-            hour: "2-digit", minute: "2-digit", timeZone: "Europe/London"
-          })
-        : "TBC",
-      ts: e.startTimestamp || 0,
-      liveOdds: {},
-      hasOdds: false,
-      hasStats: false,
-      utcDate: e.startTimestamp ? new Date(e.startTimestamp * 1000).toISOString() : new Date().toISOString(),
-      homeTeam: { name: e.homeTeam?.shortName || e.homeTeam?.name || "Home" },
-      awayTeam: { name: e.awayTeam?.shortName || e.awayTeam?.name || "Away" },
-      competition: { name: league, code: "" },
-    })).filter(m => m.home !== "Home" && m.away !== "Away");
-
-    // Try odds
+    // Live odds
     let oddsData = [];
     try {
       const oddsRes = await fetch(
         `${ODDS_BASE}/sports/soccer/odds/?apiKey=${ODDS_KEY}&regions=uk,eu&markets=h2h,totals,btts&oddsFormat=decimal&dateFormat=iso`
       );
-      if (oddsRes.ok) oddsData = await oddsRes.json();
-    } catch(e) {}
+      if (oddsRes.ok) {
+        oddsData = await oddsRes.json();
+        console.log(`Odds: ${oddsData.length} events`);
+      }
+    } catch(e) {
+      console.log("Odds failed:", e.message);
+    }
+
+    // Match odds to fixtures
+    function norm(n) {
+      return (n || "").toLowerCase()
+        .replace(/\b(fc|cf|sc|afc|ac|as|rc|cd|ud|sd|rcd)\b/g, "")
+        .replace(/[^a-z0-9]/g, "").trim();
+    }
+
+    function findOdds(home, away) {
+      const h = norm(home), a = norm(away);
+      return oddsData.find(e => {
+        const eh = norm(e.home_team || ""), ea = norm(e.away_team || "");
+        return (eh.includes(h) || h.includes(eh)) && (ea.includes(a) || a.includes(ea));
+      });
+    }
+
+    function extractOdds(event) {
+      if (!event) return {};
+      const out = {};
+      for (const bm of (event.bookmakers || [])) {
+        for (const mkt of (bm.markets || [])) {
+          if (mkt.key === "h2h") {
+            for (const o of mkt.outcomes || []) {
+              const n = norm(o.name);
+              const hN = norm(event.home_team);
+              const aN = norm(event.away_team);
+              if (n === hN || n === "home") { if (!out.hw || o.price < out.hw) out.hw = parseFloat(o.price.toFixed(2)); }
+              else if (n === aN || n === "away") { if (!out.aw || o.price < out.aw) out.aw = parseFloat(o.price.toFixed(2)); }
+              else if (n === "draw") { if (!out.draw || o.price < out.draw) out.draw = parseFloat(o.price.toFixed(2)); }
+            }
+          }
+          if (mkt.key === "totals") {
+            for (const o of mkt.outcomes || []) {
+              const n = (o.name || "").toLowerCase();
+              const pt = parseFloat(o.point);
+              if (n === "over"  && pt === 2.5) out.ov25 = parseFloat(o.price.toFixed(2));
+              if (n === "under" && pt === 2.5) out.un25 = parseFloat(o.price.toFixed(2));
+              if (n === "over"  && pt === 1.5) out.ov15 = parseFloat(o.price.toFixed(2));
+              if (n === "over"  && pt === 3.5) out.ov35 = parseFloat(o.price.toFixed(2));
+            }
+          }
+          if (mkt.key === "btts" || mkt.key === "both_teams_to_score") {
+            for (const o of mkt.outcomes || []) {
+              const n = (o.name || "").toLowerCase();
+              if (n === "yes") out.bttsY = parseFloat(o.price.toFixed(2));
+              if (n === "no")  out.bttsN = parseFloat(o.price.toFixed(2));
+            }
+          }
+        }
+        if (out.hw && out.aw) break;
+      }
+      return out;
+    }
+
+    // Attach odds to each fixture
+    const enriched = allMatches.map(m => {
+      const oddsEvent = findOdds(m.homeFull || m.home, m.awayFull || m.away);
+      const liveOdds = extractOdds(oddsEvent);
+      return { ...m, liveOdds, hasOdds: Object.keys(liveOdds).length > 0 };
+    });
 
     return {
       statusCode: 200,
       headers,
       body: JSON.stringify({
-        matches: fixtures,
+        matches: enriched,
         meta: {
           date: today,
-          fixtureCount: fixtures.length,
-          withOdds: 0,
+          fixtureCount: enriched.length,
+          withOdds: enriched.filter(m => m.hasOdds).length,
           withStats: 0,
           oddsEvents: oddsData.length,
           source: "sofascore",
-          debug: debugInfo,
         }
       }),
     };
@@ -148,7 +195,7 @@ exports.handler = async function(event, context) {
     return {
       statusCode: 500,
       headers,
-      body: JSON.stringify({ error: error.message, matches: [], debug: error.message }),
+      body: JSON.stringify({ error: error.message, matches: [] }),
     };
   }
 };
