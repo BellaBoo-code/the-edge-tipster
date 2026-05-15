@@ -126,8 +126,12 @@ exports.handler = async function(event, context) {
 
     // ── 4. LIVE STANDINGS ─────────────────────────────────────────
     const standingsMap = {};
+    // Try current season standings, fall back to previous if empty
     await Promise.allSettled(FD_COMPS.map(async code => {
-      const data = await fdGet(`/competitions/${code}/standings`);
+      let data = await fdGet(`/competitions/${code}/standings?season=2025`);
+      if (!data || !data.standings?.[0]?.table?.length) {
+        data = await fdGet(`/competitions/${code}/standings?season=2024`);
+      }
       if (!data) return;
       const table = data.standings?.[0]?.table || [];
       table.forEach(entry => {
@@ -155,7 +159,7 @@ exports.handler = async function(event, context) {
     let oddsData = [];
     try {
       const oddsRes = await fetch(
-        `${ODDS_BASE}/sports/soccer/odds/?apiKey=${ODDS_KEY}&regions=uk,eu&markets=h2h,totals,btts&oddsFormat=decimal&dateFormat=iso`
+        `${ODDS_BASE}/sports/soccer/odds/?apiKey=${ODDS_KEY}&regions=uk,eu&markets=h2h,totals&oddsFormat=decimal&dateFormat=iso`
       );
       const oddsText = await oddsRes.text();
       debug.steps.push(`odds status: ${oddsRes.status}, length: ${oddsText.length}`);
