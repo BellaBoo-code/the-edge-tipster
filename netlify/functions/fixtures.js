@@ -60,8 +60,14 @@ exports.handler = async function(event, context) {
     let allFixtures = [];
     try {
       const data = await apiGet(`/football-get-matches-by-date?date=${dateFormatted}`);
-      const matches = data?.response || data?.matches || data?.events || data?.data || [];
-      allFixtures = matches;
+      console.log("Raw response keys:", Object.keys(data || {}));
+      // Handle all possible response structures
+      let raw = data?.response || data?.matches || data?.events || data?.data || data?.result || data;
+      if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+        // Might be nested — try common keys
+        raw = raw.matches || raw.events || raw.fixtures || raw.data || Object.values(raw)[0] || [];
+      }
+      allFixtures = Array.isArray(raw) ? raw : [];
       console.log(`Raw fixtures: ${allFixtures.length}`);
     } catch(e) {
       console.log("Fixtures fetch error:", e.message);
