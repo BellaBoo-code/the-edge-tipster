@@ -1,7 +1,9 @@
 exports.handler = async function(event, context) {
   const RAPID_KEY  = "6bebc9a495msh3e46b1cd76f8643p1ca878jsn73f39e431e93";
-  const RAPID_HOST = "free-api-live-football-data.p.rapidapi.com";
-  const RAPID_BASE = "https://free-api-live-football-data.p.rapidapi.com";
+  const RAPID_HOST = "sofascore.p.rapidapi.com";
+  const RAPID_BASE = "https://sofascore.p.rapidapi.com";
+  const FD_TOKEN   = "faf76b5f8a1f40da96253222b4c306a8";
+  const FD_BASE    = "https://api.football-data.org/v4";
   const ODDS_KEY   = "053907056f68e2408aa33038cc56be7c";
   const ODDS_BASE  = "https://api.the-odds-api.com/v4";
 
@@ -15,175 +17,135 @@ exports.handler = async function(event, context) {
     return { statusCode: 200, headers, body: "" };
   }
 
-  async function apiGet(path) {
+  const ALLOWED_LEAGUES = [
+    "premier league", "championship", "league one", "league two",
+    "scottish premiership", "eredivisie", "la liga", "laliga",
+    "serie a", "ligue 1", "bundesliga", "mls", "major league soccer",
+    "champions league", "europa league", "conference league",
+    "world cup", "fifa world cup", "european championship", "uefa euro",
+    "playoffs", "relegation",
+  ];
+
+  function isAllowed(name) {
+    const n = (name || "").toLowerCase();
+    return ALLOWED_LEAGUES.some(x => n.includes(x));
+  }
+
+  // Domestic leagues fetched first — stats take priority over European
+  const DOMESTIC_COMPS = ["PL","ELC","PD","BL1","SA","FL1","DED","PPL"];
+  const EURO_COMPS     = ["CL","EL","ECL"];
+
+  const CATEGORY_IDS = [1, 2, 4, 5, 6, 7, 8, 85, 200, 201, 203, 204, 205];
+
+  async function sofaGet(path) {
     const r = await fetch(`${RAPID_BASE}${path}`, {
       headers: {
         "x-rapidapi-key": RAPID_KEY,
         "x-rapidapi-host": RAPID_HOST,
-        "Content-Type": "application/json",
       }
     });
-    if (!r.ok) throw new Error(`API ${r.status}: ${path}`);
+    if (!r.ok) throw new Error(`Sofascore ${r.status}`);
     return r.json();
   }
 
-  // League IDs confirmed from API
-  const LEAGUES = [
-    // International (confirmed IDs)
-    { id: 42,    name: "Champions League",     country: "Europe"      },
-    { id: 73,    name: "Europa League",         country: "Europe"      },
-    { id: 10216, name: "Conference League",     country: "Europe"      },
-    { id: 77,    name: "World Cup",             country: "International"},
-    { id: 50,    name: "EURO",                  country: "International"},
-    // Domestic — IDs to be confirmed from fixtures response
-    { id: 47,    name: "Premier League",        country: "England"     },
-    { id: 48,    name: "Championship",          country: "England"     },
-    { id: 49,    name: "League One",            country: "England"     },
-    { id: 51,    name: "League Two",            country: "England"     },
-    { id: 87,    name: "La Liga",               country: "Spain"       },
-    { id: 54,    name: "Bundesliga",            country: "Germany"     },
-    { id: 55,    name: "Serie A",               country: "Italy"       },
-    { id: 53,    name: "Ligue 1",               country: "France"      },
-    { id: 57,    name: "Eredivisie",            country: "Netherlands" },
-    { id: 84,    name: "Scottish Premiership",  country: "Scotland"    },
-    { id: 242,   name: "MLS",                   country: "USA"         },
-  ];
-
-  const LEAGUE_MAP = {};
-  LEAGUES.forEach(l => { LEAGUE_MAP[l.id] = l; });
+  async function fdGet(path) {
+    const r = await fetch(`${FD_BASE}${path}`, {
+      headers: { "X-Auth-Token": FD_TOKEN }
+    });
+    if (!r.ok) return null;
+    return r.json();
+  }
 
   try {
     const today = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/London" });
-    const dateFormatted = today.replace(/-/g, ""); // YYYYMMDD format
-    console.log("Date formatted:", dateFormatted, "Today:", today);
 
-    // ── 1. TODAY'S FIXTURES ───────────────────────────────────────
-    let allFixtures = [];
-    try {
-      const data = await apiGet(`/football-get-matches-by-date?date=${dateFormatted}`);
-      
-      // Log full structure for debugging
-      const dataStr = JSON.stringify(data).slice(0, 1000);
-      console.log("Raw response sample:", dataStr);
-      
-      // Handle all possible response structures
-      let raw = data?.response || data?.matches || data?.events || data?.data || data?.result || data;
-      if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-        raw = raw.matches || raw.events || raw.fixtures || raw.data || Object.values(raw)[0] || [];
-      }
-      allFixtures = Array.isArray(raw) ? raw : [];
-      
-      // Log league IDs from fixtures so we can identify correct IDs
-      if (allFixtures.length > 0) {
-        console.log("Sample fixture:", JSON.stringify(allFixtures[0]).slice(0, 500));
-        // Get unique league IDs and names
-        const leagueInfo = {};
-        allFixtures.forEach(m => {
-          const lid = m.league?.id || m.leagueId;
-          const lname = m.league?.name || m.leagueName || "";
-          if (lid && lname) leagueInfo[lid] = lname;
-        });
-        console.log("League IDs in fixtures:", JSON.stringify(leagueInfo).slice(0, 1000));
-      }
-      console.log(`Raw fixtures: ${allFixtures.length}`);
-    } catch(e) {
-      console.log("Fixtures fetch error:", e.message);
+    // ── 1. FIXTURES FROM SOFASCORE ────────────────────────────────
+    const sofaResults = await Promise.allSettled(
+      CATEGORY_IDS.map(id =>
+        sofaGet(`/tournaments/get-scheduled-events?categoryId=${id}&date=${today}`)
+          .then(raw => raw.events || [])
+          .catch(() => [])
+      )
+    );
+
+    const allEvents = [];
+    for (const r of sofaResults) {
+      if (r.status === "fulfilled") allEvents.push(...r.value);
     }
 
-    // Filter to our leagues and today only
-    const leagueIds = new Set(LEAGUES.map(l => l.id));
-    const leagueNames = [
-      "premier league", "championship", "league one", "league two",
-      "la liga", "bundesliga", "serie a", "ligue 1", "eredivisie",
-      "scottish premiership", "mls", "major league soccer",
-      "champions league", "europa league", "conference league",
-      "world cup", "euro", "playoffs"
-    ];
-
-    const fixtures = allFixtures
-      .filter(m => {
-        // leagueId is the correct field name for this API
-        const lid = m.leagueId || m.league?.id || m.competition?.id;
-        const lname = (m.league?.name || m.leagueName || m.competition?.name || "").toLowerCase();
-        const idMatch = leagueIds.has(lid) || leagueIds.has(parseInt(lid));
-        const nameMatch = leagueNames.some(n => lname.includes(n));
-        if (!idMatch && !nameMatch) return false;
-        // Check date matches today using the time field
-        if (m.time) {
-          const parts = m.time.split(" ");
-          if (parts.length === 2) {
-            const [d,mo,y] = parts[0].split(".");
-            const matchDate = `${y}-${mo}-${d}`;
-            if (matchDate !== today) return false;
-          }
+    const seen = new Set();
+    const fixtures = allEvents
+      .filter(e => {
+        if (seen.has(e.id)) return false;
+        seen.add(e.id);
+        if (e.status?.type !== "notstarted") return false;
+        const ts = e.startTimestamp || 0;
+        if (ts) {
+          const d = new Date(ts * 1000).toLocaleDateString("en-CA", { timeZone: "Europe/London" });
+          if (d !== today) return false;
         }
-        // Exclude finished games
-        const status = (m.status?.short || m.status || m.statusShort || "").toUpperCase();
-        if (status === "FT" || status === "AET" || status === "PEN" || status === "FINISHED") return false;
-        // Exclude women/youth
-        if (lname.includes("women") || lname.includes("u21") || lname.includes("u18") || lname.includes("youth")) return false;
+        if (!isAllowed(e.tournament?.name || "")) return false;
+        if (!e.homeTeam?.name || !e.awayTeam?.name) return false;
         return true;
       })
-      .map(m => {
-        const lid = m.league?.id || m.leagueId || m.competition?.id;
-        const league = LEAGUE_MAP[lid] || LEAGUE_MAP[parseInt(lid)] || { name: "Football", country: "" };
-        const ts = m.fixture?.timestamp || m.timestamp || m.startTimestamp || 0;
-        return {
-          id: m.fixture?.id || m.id || m.eventId,
-          home: m.teams?.home?.name || m.homeTeam?.name || m.home?.name || "Home",
-          away: m.teams?.away?.name || m.awayTeam?.name || m.away?.name || "Away",
-          homeFull: m.teams?.home?.name || m.homeTeam?.name || "",
-          awayFull: m.teams?.away?.name || m.awayTeam?.name || "",
-          homeId: m.teams?.home?.id || m.homeTeam?.id,
-          awayId: m.teams?.away?.id || m.awayTeam?.id,
-          leagueId: lid,
-          league: league.name,
-          country: league.country,
-          kickoff: ts
-            ? new Date(ts * 1000).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/London" })
-            : m.fixture?.date ? new Date(m.fixture.date).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/London" }) : "TBC",
-          ts,
-        };
-      })
-      .filter(m => m.home !== "Home" && m.away !== "Away")
+      .map(e => ({
+        id: e.id,
+        home: e.homeTeam?.shortName || e.homeTeam?.name,
+        away: e.awayTeam?.shortName || e.awayTeam?.name,
+        homeFull: e.homeTeam?.name || "",
+        awayFull: e.awayTeam?.name || "",
+        league: e.tournament?.name || "Football",
+        country: e.tournament?.category?.name || "",
+        kickoff: e.startTimestamp
+          ? new Date(e.startTimestamp * 1000).toLocaleTimeString("en-GB", {
+              hour: "2-digit", minute: "2-digit", timeZone: "Europe/London"
+            })
+          : "TBC",
+        ts: e.startTimestamp || 0,
+      }))
       .sort((a, b) => a.ts - b.ts);
 
-    console.log(`Filtered fixtures: ${fixtures.length}`);
+    console.log(`Fixtures: ${fixtures.length}`);
 
-    // ── 2. LIVE STANDINGS for each league ─────────────────────────
+    // ── 2. LIVE STANDINGS — domestic first, then European ─────────
     const standingsMap = {};
 
-    await Promise.allSettled(LEAGUES.map(async league => {
-      try {
-        const data = await apiGet(`/football-get-standing-all?leagueid=${league.id}`);
-        const table = data?.response || data?.standings || data?.data || [];
-        const rows = Array.isArray(table) ? table : table?.standing || [];
-
-        rows.forEach(row => {
-          const teamName  = row?.team?.name || row?.teamName || row?.name || "";
-          const teamShort = row?.team?.shortName || teamName;
-          if (!teamName) return;
-
-          const stats = {
-            position: row?.rank || row?.position || row?.pos || 10,
-            played:   row?.played || row?.games?.played || row?.gp || 30,
-            won:      row?.won || row?.games?.win?.total || row?.w || 12,
-            drawn:    row?.drawn || row?.games?.draw?.total || row?.d || 7,
-            lost:     row?.lost || row?.games?.lose?.total || row?.l || 11,
-            gf:       row?.goalsFor || row?.goals?.for?.total || row?.gf || 40,
-            ga:       row?.goalsAgainst || row?.goals?.against?.total || row?.ga || 40,
-            points:   row?.points || row?.pts || 43,
-            form:     (row?.form || "").split("").filter(c => ["W","D","L"].includes(c)).slice(-5),
-            league:   league.name,
-          };
-
-          standingsMap[teamName.toLowerCase()]  = stats;
-          standingsMap[teamShort.toLowerCase()] = stats;
-        });
-      } catch(e) {
-        // Silent fail
+    function addToMap(name, short, stats) {
+      const key = name.toLowerCase();
+      const keyShort = short.toLowerCase();
+      const existing = standingsMap[key];
+      // Prefer entry with more games played (domestic > european)
+      if (!existing || stats.played > existing.played) {
+        standingsMap[key] = stats;
+        standingsMap[keyShort] = stats;
       }
-    }));
+    }
+
+    // Fetch domestic leagues sequentially to avoid rate limit
+    for (const code of [...DOMESTIC_COMPS, ...EURO_COMPS]) {
+      try {
+        const data = await fdGet(`/competitions/${code}/standings`);
+        if (!data) continue;
+        const table = data.standings?.[0]?.table || [];
+        table.forEach(entry => {
+          const name  = entry.team?.name || "";
+          const short = entry.team?.shortName || name;
+          if (!name) return;
+          addToMap(name, short, {
+            position: entry.position,
+            played:   entry.playedGames,
+            won:      entry.won,
+            drawn:    entry.draw,
+            lost:     entry.lost,
+            gf:       entry.goalsFor,
+            ga:       entry.goalsAgainst,
+            gd:       entry.goalDifference,
+            points:   entry.points,
+            form:     (entry.form || "").split(",").filter(Boolean).slice(-5),
+          });
+        });
+      } catch(e) { continue; }
+    }
 
     console.log(`Teams with stats: ${Object.keys(standingsMap).length / 2}`);
 
@@ -197,9 +159,7 @@ exports.handler = async function(event, context) {
         oddsData = await oddsRes.json();
         console.log(`Odds: ${oddsData.length} events`);
       }
-    } catch(e) {
-      console.log("Odds error:", e.message);
-    }
+    } catch(e) { console.log("Odds error:", e.message); }
 
     function norm(n) {
       return (n || "").toLowerCase()
@@ -246,7 +206,7 @@ exports.handler = async function(event, context) {
       return out;
     }
 
-    // ── 4. ENRICH FIXTURES ────────────────────────────────────────
+    // ── 4. ENRICH ─────────────────────────────────────────────────
     const enriched = fixtures.map(f => {
       const homeStats = standingsMap[f.homeFull.toLowerCase()] ||
                         standingsMap[f.home.toLowerCase()] || null;
@@ -285,7 +245,7 @@ exports.handler = async function(event, context) {
           withStats: enriched.filter(m => m.hasStats).length,
           oddsEvents: oddsData.length,
           teamsWithStats: Object.keys(standingsMap).length / 2,
-          source: "free-api-live-football-data + odds-api",
+          source: "sofascore+football-data+odds-api",
         }
       }),
     };
