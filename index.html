@@ -579,7 +579,7 @@ function selectPick(hN, aN, stats, liveOdds, trusted) {
   const MAX_ODDS = 4.00;
  
   // Reject if we don't know either team — no guessing
-  if (!s.bothKnown) return null;
+  
  
   function add(mkt, sel, prob, reason, bookKey) {
     if (prob < MIN_PROB) return; // Must be genuinely confident
