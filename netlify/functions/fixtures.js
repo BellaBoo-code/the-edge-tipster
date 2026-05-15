@@ -31,19 +31,7 @@ exports.handler = async function(event, context) {
     return ALLOWED_LEAGUES.some(x => n.includes(x));
   }
 
-  const CATEGORY_IDS = [1, 2, 4, 5, 6, 7, 8, 85, 200, 201, 203, 204, 205];
   const FD_COMPS = ["PL","ELC","PD","BL1","SA","FL1","DED","PPL","CL","EL","ECL"];
-
-  async function sofaGet(path) {
-    const r = await fetch(`${RAPID_BASE}${path}`, {
-      headers: {
-        "x-rapidapi-key": RAPID_KEY,
-        "x-rapidapi-host": RAPID_HOST,
-      }
-    });
-    if (!r.ok) throw new Error(`Sofascore ${r.status}`);
-    return r.json();
-  }
 
   async function fdGet(path) {
     const r = await fetch(`${FD_BASE}${path}`, {
@@ -55,37 +43,66 @@ exports.handler = async function(event, context) {
 
   try {
     const today = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/London" });
+    const debug = { today, steps: [] };
 
-    // ── 1. FIXTURES ───────────────────────────────────────────────
-    const sofaResults = await Promise.allSettled(
-      CATEGORY_IDS.map(id =>
-        sofaGet(`/tournaments/get-scheduled-events?categoryId=${id}&date=${today}`)
-          .then(raw => raw.events || [])
-          .catch(() => [])
-      )
+    // ── 1. TRY FOOTBALL-DATA.ORG FOR FIXTURES DIRECTLY ───────────
+    // This avoids Sofascore entirely and uses what we know works
+    const fdFixtures = await fdGet(`/matches?dateFrom=${today}&dateTo=${today}`);
+    const fdMatches = (fdFixtures?.matches || []).filter(m =>
+      m.status === "TIMED" || m.status === "SCHEDULED"
     );
+    debug.steps.push(`football-data fixtures: ${fdMatches.length}`);
 
-    const allEvents = [];
-    for (const r of sofaResults) {
-      if (r.status === "fulfilled") allEvents.push(...r.value);
-    }
-
-    const seen = new Set();
-    const fixtures = allEvents
-      .filter(e => {
-        if (seen.has(e.id)) return false;
-        seen.add(e.id);
+    // ── 2. TRY SOFASCORE FOR TODAY ────────────────────────────────
+    let sofaMatches = [];
+    try {
+      const sofaRes = await fetch(
+        `${RAPID_BASE}/tournaments/get-scheduled-events?categoryId=1&date=${today}`,
+        {
+          headers: {
+            "x-rapidapi-key": RAPID_KEY,
+            "x-rapidapi-host": RAPID_HOST,
+          }
+        }
+      );
+      const sofaData = await sofaRes.json();
+      const events = sofaData?.events || [];
+      debug.steps.push(`sofascore status: ${sofaRes.status}, events: ${events.length}`);
+      sofaMatches = events.filter(e => {
         if (e.status?.type !== "notstarted") return false;
         const ts = e.startTimestamp || 0;
         if (ts) {
           const d = new Date(ts * 1000).toLocaleDateString("en-CA", { timeZone: "Europe/London" });
           if (d !== today) return false;
         }
-        if (!isAllowed(e.tournament?.name || "")) return false;
-        if (!e.homeTeam?.name || !e.awayTeam?.name) return false;
-        return true;
-      })
-      .map(e => ({
+        return isAllowed(e.tournament?.name || "");
+      });
+      debug.steps.push(`sofascore filtered: ${sofaMatches.length}`);
+    } catch(e) {
+      debug.steps.push(`sofascore error: ${e.message}`);
+    }
+
+    // ── 3. COMBINE — use whichever has more data ──────────────────
+    const useFD = fdMatches.length >= sofaMatches.length;
+    debug.steps.push(`using: ${useFD ? "football-data" : "sofascore"}`);
+
+    let fixtures = [];
+    if (useFD && fdMatches.length > 0) {
+      fixtures = fdMatches.map(m => ({
+        id: m.id,
+        home: m.homeTeam?.shortName || m.homeTeam?.name,
+        away: m.awayTeam?.shortName || m.awayTeam?.name,
+        homeFull: m.homeTeam?.name || "",
+        awayFull: m.awayTeam?.name || "",
+        league: m.competition?.name || "Football",
+        country: m.area?.name || "",
+        kickoff: new Date(m.utcDate).toLocaleTimeString("en-GB", {
+          hour: "2-digit", minute: "2-digit", timeZone: "Europe/London"
+        }),
+        ts: new Date(m.utcDate).getTime() / 1000,
+      }));
+    } else if (sofaMatches.length > 0) {
+      fixtures = sofaMatches.map(e => ({
         id: e.id,
         home: e.homeTeam?.shortName || e.homeTeam?.name,
         away: e.awayTeam?.shortName || e.awayTeam?.name,
@@ -99,14 +116,16 @@ exports.handler = async function(event, context) {
             })
           : "TBC",
         ts: e.startTimestamp || 0,
-      }))
-      .sort((a, b) => a.ts - b.ts);
+      }));
+    }
 
-    console.log(`Fixtures: ${fixtures.length}`);
+    debug.steps.push(`total fixtures: ${fixtures.length}`);
+    if (fixtures.length > 0) {
+      debug.steps.push(`sample: ${fixtures[0].home} vs ${fixtures[0].away} (${fixtures[0].league})`);
+    }
 
-    // ── 2. LIVE STANDINGS from football-data.org ──────────────────
+    // ── 4. LIVE STANDINGS ─────────────────────────────────────────
     const standingsMap = {};
-
     await Promise.allSettled(FD_COMPS.map(async code => {
       const data = await fdGet(`/competitions/${code}/standings`);
       if (!data) return;
@@ -130,24 +149,24 @@ exports.handler = async function(event, context) {
         standingsMap[short.toLowerCase()] = stats;
       });
     }));
+    debug.steps.push(`teams with stats: ${Object.keys(standingsMap).length / 2}`);
 
-    console.log(`Teams with stats: ${Object.keys(standingsMap).length / 2}`);
-
-    // ── 3. LIVE ODDS ──────────────────────────────────────────────
+    // ── 5. LIVE ODDS ──────────────────────────────────────────────
     let oddsData = [];
     try {
       const oddsRes = await fetch(
         `${ODDS_BASE}/sports/soccer/odds/?apiKey=${ODDS_KEY}&regions=uk,eu&markets=h2h,totals,btts&oddsFormat=decimal&dateFormat=iso`
       );
+      const oddsText = await oddsRes.text();
+      debug.steps.push(`odds status: ${oddsRes.status}, length: ${oddsText.length}`);
       if (oddsRes.ok) {
-        oddsData = await oddsRes.json();
-        console.log(`Odds events: ${oddsData.length}`);
+        oddsData = JSON.parse(oddsText);
+        debug.steps.push(`odds events: ${oddsData.length}`);
       } else {
-        const errText = await oddsRes.text();
-        console.log(`Odds error ${oddsRes.status}: ${errText.slice(0,100)}`);
+        debug.steps.push(`odds error: ${oddsText.slice(0,100)}`);
       }
     } catch(e) {
-      console.log("Odds failed:", e.message);
+      debug.steps.push(`odds exception: ${e.message}`);
     }
 
     function norm(n) {
@@ -202,7 +221,6 @@ exports.handler = async function(event, context) {
       return out;
     }
 
-    // ── 4. ENRICH ─────────────────────────────────────────────────
     const enriched = fixtures.map(f => {
       const homeStats = standingsMap[f.homeFull.toLowerCase()] ||
                         standingsMap[f.home.toLowerCase()] || null;
@@ -240,13 +258,13 @@ exports.handler = async function(event, context) {
           withOdds:  enriched.filter(m => m.hasOdds).length,
           withStats: enriched.filter(m => m.hasStats).length,
           oddsEvents: oddsData.length,
-          source: "sofascore+football-data+odds-api",
+          source: "football-data+sofascore+odds-api",
+          debug,
         }
       }),
     };
 
   } catch (error) {
-    console.error("Error:", error.message);
     return {
       statusCode: 500,
       headers,
