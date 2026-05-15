@@ -60,14 +60,30 @@ exports.handler = async function(event, context) {
     let allFixtures = [];
     try {
       const data = await apiGet(`/football-get-matches-by-date?date=${dateFormatted}`);
-      console.log("Raw response keys:", Object.keys(data || {}));
+      
+      // Log full structure for debugging
+      const dataStr = JSON.stringify(data).slice(0, 1000);
+      console.log("Raw response sample:", dataStr);
+      
       // Handle all possible response structures
       let raw = data?.response || data?.matches || data?.events || data?.data || data?.result || data;
       if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-        // Might be nested — try common keys
         raw = raw.matches || raw.events || raw.fixtures || raw.data || Object.values(raw)[0] || [];
       }
       allFixtures = Array.isArray(raw) ? raw : [];
+      
+      // Log league IDs from fixtures so we can identify correct IDs
+      if (allFixtures.length > 0) {
+        console.log("Sample fixture:", JSON.stringify(allFixtures[0]).slice(0, 500));
+        // Get unique league IDs and names
+        const leagueInfo = {};
+        allFixtures.forEach(m => {
+          const lid = m.league?.id || m.leagueId;
+          const lname = m.league?.name || m.leagueName || "";
+          if (lid && lname) leagueInfo[lid] = lname;
+        });
+        console.log("League IDs in fixtures:", JSON.stringify(leagueInfo).slice(0, 1000));
+      }
       console.log(`Raw fixtures: ${allFixtures.length}`);
     } catch(e) {
       console.log("Fixtures fetch error:", e.message);
