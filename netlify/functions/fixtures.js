@@ -15,15 +15,14 @@ exports.handler = async function(event, context) {
     return { statusCode: 200, headers, body: "" };
   }
 
-  // Leagues/keywords to exclude
   const EXCLUDE = [
     "women", "u18", "u21", "u23", "u17", "u16", "u15", "youth",
     "reserve", "reserves", "b team", "friendly", "friendlies",
-    "indoor", "futsal", "beach", "esport"
+    "indoor", "futsal", "beach", "esport", "amateur", "fa youth"
   ];
 
-  function isExcluded(leagueName) {
-    const n = (leagueName || "").toLowerCase();
+  function isExcluded(name) {
+    const n = (name || "").toLowerCase();
     return EXCLUDE.some(x => n.includes(x));
   }
 
@@ -35,40 +34,68 @@ exports.handler = async function(event, context) {
         "Content-Type": "application/json",
       }
     });
-    if (!r.ok) {
-      const txt = await r.text();
-      throw new Error(`Sofascore ${r.status}: ${txt.slice(0,200)}`);
-    }
+    if (!r.ok) throw new Error(`Sofascore ${r.status}`);
     return r.json();
   }
 
   try {
     const today = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/London" });
 
-    // Fetch today's football fixtures from Sofascore
-    const raw = await sofaGet(`/tournaments/get-scheduled-events?categoryId=1&date=${today}`);
+    // Sofascore football category IDs covering all major regions
+    // 1=England, 2=Germany, 3=Portugal, 4=Spain, 5=Italy, 6=Netherlands,
+    // 7=France, 8=Scotland, 10=Turkey, 12=Belgium, 13=Greece, 15=Russia,
+    // 17=Poland, 22=Switzerland, 23=Austria, 24=Czech Rep, 27=Romania,
+    // 32=Denmark, 34=Norway, 35=Sweden, 37=Finland, 44=Croatia, 52=Serbia,
+    // 56=Slovakia, 60=Slovenia, 66=Bulgaria, 72=Israel, 77=Japan, 78=South Korea,
+    // 80=Australia, 85=USA, 110=Brazil, 130=Argentina, 132=Mexico,
+    // 155=Saudi Arabia, 156=UAE, 168=South Africa, 200=World Cup, 201=Euro,
+    // 202=Nations League, 203=Champions League, 204=Europa League, 205=Conference League
+    const CATEGORY_IDS = [
+      1,2,3,4,5,6,7,8,10,12,13,15,17,22,23,24,27,32,34,35,37,
+      44,52,56,60,66,72,77,78,80,85,110,130,132,155,156,168,
+      200,201,202,203,204,205
+    ];
 
-    // Response comes back as raw.events (flat list)
-    const events = raw.events || [];
-    console.log(`Raw events: ${events.length}`);
+    // Fetch all categories in parallel - limit to avoid timeout
+    const results = await Promise.allSettled(
+      CATEGORY_IDS.map(id =>
+        sofaGet(`/tournaments/get-scheduled-events?categoryId=${id}&date=${today}`)
+          .then(raw => ({ id, events: raw.events || [] }))
+          .catch(() => ({ id, events: [] }))
+      )
+    );
 
-    // Filter and map to our format
-    const allMatches = events
+    // Collect all events
+    const allEvents = [];
+    for (const r of results) {
+      if (r.status === "fulfilled") {
+        allEvents.push(...r.value.events);
+      }
+    }
+
+    console.log(`Total raw events: ${allEvents.length}`);
+
+    // Deduplicate by event ID
+    const seen = new Set();
+    const unique = allEvents.filter(e => {
+      if (seen.has(e.id)) return false;
+      seen.add(e.id);
+      return true;
+    });
+
+    console.log(`Unique events: ${unique.length}`);
+
+    // Filter and map
+    const allMatches = unique
       .filter(e => {
-        // Only not-started games
         if (e.status?.type !== "notstarted") return false;
-
-        // Check date is today UK time
         const ts = e.startTimestamp || 0;
         if (ts) {
           const d = new Date(ts * 1000).toLocaleDateString("en-CA", { timeZone: "Europe/London" });
           if (d !== today) return false;
         }
-
-        // Exclude women's, youth, etc
         const leagueName = e.tournament?.name || "";
         if (isExcluded(leagueName)) return false;
-
         return true;
       })
       .map(e => ({
@@ -106,15 +133,9 @@ exports.handler = async function(event, context) {
       const oddsRes = await fetch(
         `${ODDS_BASE}/sports/soccer/odds/?apiKey=${ODDS_KEY}&regions=uk,eu&markets=h2h,totals,btts&oddsFormat=decimal&dateFormat=iso`
       );
-      if (oddsRes.ok) {
-        oddsData = await oddsRes.json();
-        console.log(`Odds: ${oddsData.length} events`);
-      }
-    } catch(e) {
-      console.log("Odds failed:", e.message);
-    }
+      if (oddsRes.ok) oddsData = await oddsRes.json();
+    } catch(e) {}
 
-    // Match odds to fixtures
     function norm(n) {
       return (n || "").toLowerCase()
         .replace(/\b(fc|cf|sc|afc|ac|as|rc|cd|ud|sd|rcd)\b/g, "")
@@ -167,7 +188,6 @@ exports.handler = async function(event, context) {
       return out;
     }
 
-    // Attach odds to each fixture
     const enriched = allMatches.map(m => {
       const oddsEvent = findOdds(m.homeFull || m.home, m.awayFull || m.away);
       const liveOdds = extractOdds(oddsEvent);
@@ -185,7 +205,7 @@ exports.handler = async function(event, context) {
           withOdds: enriched.filter(m => m.hasOdds).length,
           withStats: 0,
           oddsEvents: oddsData.length,
-          source: "sofascore",
+          source: "sofascore-global",
         }
       }),
     };
