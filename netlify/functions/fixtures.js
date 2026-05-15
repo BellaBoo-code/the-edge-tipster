@@ -96,7 +96,7 @@ exports.handler = async function(event, context) {
       return true;
     });
 
-    // Filter to today, senior men's football
+    // Filter to today, senior men's football only
     const fixtures = unique
       .filter(e => {
         if (e.status?.type !== "notstarted") return false;
@@ -105,6 +105,16 @@ exports.handler = async function(event, context) {
           const d = new Date(ts * 1000).toLocaleDateString("en-CA", { timeZone: "Europe/London" });
           if (d !== today) return false;
         }
+        // Must be football sport
+        const sport = e.tournament?.category?.sport?.slug || 
+                      e.tournament?.sport?.slug || "";
+        if (sport && sport !== "football") return false;
+        // Must have team names (not individual players like tennis)
+        const home = e.homeTeam?.name || "";
+        const away = e.awayTeam?.name || "";
+        // Individual sport check — names with initials like "J. Smith" are not football teams
+        const individualPattern = /^[A-Z]\.\s[A-Z]/;
+        if (individualPattern.test(home) || individualPattern.test(away)) return false;
         if (isExcluded(e.tournament?.name || "")) return false;
         return true;
       })
