@@ -555,7 +555,7 @@ function analyseMatch(hName, aName, hLive, aLive) {
 // ═══════════════════════════════════════════════════════════
 // PICK SELECTOR — smarter selection with value detection
 // ═══════════════════════════════════════════════════════════
-function selectPick(hN, aN, stats, liveOdds) {
+function selectPick(hN, aN, stats, liveOdds, trusted) {
   const s = stats;
   const lo = liveOdds || {};
   const candidates = [];
