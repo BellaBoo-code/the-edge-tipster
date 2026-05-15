@@ -21,11 +21,9 @@ exports.handler = async function(event, context) {
     "premier league", "championship", "league one", "league two",
     "scottish premiership", "eredivisie", "la liga", "laliga",
     "serie a", "ligue 1", "bundesliga", "mls", "major league soccer",
-    "champions league", "uefa champions league", "europa league",
-    "uefa europa league", "conference league", "uefa conference league",
+    "champions league", "europa league", "conference league",
     "world cup", "fifa world cup", "european championship", "uefa euro",
-    "league one, playoffs", "league two, playoffs", "championship playoff",
-    "relegation/promotion playoffs", "ligue 1, relegation",
+    "playoffs", "relegation",
   ];
 
   function isAllowed(leagueName) {
@@ -34,13 +32,13 @@ exports.handler = async function(event, context) {
   }
 
   const CATEGORY_IDS = [1, 2, 4, 5, 6, 7, 8, 85, 200, 201, 203, 204, 205];
+  const FD_COMPS = ["PL","ELC","PD","BL1","SA","FL1","DED","PPL","CL","EL","ECL"];
 
   async function sofaGet(path) {
     const r = await fetch(`${RAPID_BASE}${path}`, {
       headers: {
         "x-rapidapi-key": RAPID_KEY,
         "x-rapidapi-host": RAPID_HOST,
-        "Content-Type": "application/json",
       }
     });
     if (!r.ok) throw new Error(`Sofascore ${r.status}`);
@@ -58,7 +56,7 @@ exports.handler = async function(event, context) {
   try {
     const today = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/London" });
 
-    // ── 1. FETCH FIXTURES FROM SOFASCORE ─────────────────────────
+    // ── 1. FIXTURES ───────────────────────────────────────────────
     const sofaResults = await Promise.allSettled(
       CATEGORY_IDS.map(id =>
         sofaGet(`/tournaments/get-scheduled-events?categoryId=${id}&date=${today}`)
@@ -73,25 +71,18 @@ exports.handler = async function(event, context) {
     }
 
     const seen = new Set();
-    const unique = allEvents.filter(e => {
-      if (seen.has(e.id)) return false;
-      seen.add(e.id);
-      return true;
-    });
-
-    const fixtures = unique
+    const fixtures = allEvents
       .filter(e => {
+        if (seen.has(e.id)) return false;
+        seen.add(e.id);
         if (e.status?.type !== "notstarted") return false;
         const ts = e.startTimestamp || 0;
         if (ts) {
           const d = new Date(ts * 1000).toLocaleDateString("en-CA", { timeZone: "Europe/London" });
           if (d !== today) return false;
         }
-        const leagueName = e.tournament?.name || "";
-        if (!isAllowed(leagueName)) return false;
-        const home = e.homeTeam?.name || "";
-        const away = e.awayTeam?.name || "";
-        if (!home || !away) return false;
+        if (!isAllowed(e.tournament?.name || "")) return false;
+        if (!e.homeTeam?.name || !e.awayTeam?.name) return false;
         return true;
       })
       .map(e => ({
@@ -100,9 +91,6 @@ exports.handler = async function(event, context) {
         away: e.awayTeam?.shortName || e.awayTeam?.name,
         homeFull: e.homeTeam?.name || "",
         awayFull: e.awayTeam?.name || "",
-        homeId: e.homeTeam?.id,
-        awayId: e.awayTeam?.id,
-        tournamentId: e.tournament?.uniqueTournament?.id,
         league: e.tournament?.name || "Football",
         country: e.tournament?.category?.name || "",
         kickoff: e.startTimestamp
@@ -116,9 +104,8 @@ exports.handler = async function(event, context) {
 
     console.log(`Fixtures: ${fixtures.length}`);
 
-    // ── 2. LIVE STANDINGS — football-data.org for top leagues ─────
+    // ── 2. LIVE STANDINGS from football-data.org ──────────────────
     const standingsMap = {};
-    const FD_COMPS = ["PL","ELC","PD","BL1","SA","FL1","DED","PPL","CL","EL","ECL"];
 
     await Promise.allSettled(FD_COMPS.map(async code => {
       const data = await fdGet(`/competitions/${code}/standings`);
@@ -138,78 +125,29 @@ exports.handler = async function(event, context) {
           gd:       entry.goalDifference,
           points:   entry.points,
           form:     (entry.form || "").split(",").filter(Boolean).slice(-5),
-          source:   "football-data",
         };
         standingsMap[name.toLowerCase()]  = stats;
         standingsMap[short.toLowerCase()] = stats;
       });
     }));
 
-    // ── 3. SOFASCORE STANDINGS for teams not found above ──────────
-    // Get unique tournament IDs from today's fixtures
-    const uniqueTournaments = [...new Set(fixtures.map(f => f.tournamentId).filter(Boolean))];
+    console.log(`Teams with stats: ${Object.keys(standingsMap).length / 2}`);
 
-    await Promise.allSettled(uniqueTournaments.map(async tid => {
-      try {
-        // Get seasons for this tournament
-        const seasonsData = await sofaGet(`/tournaments/get-seasons?uniqueTournamentId=${tid}`);
-        const seasons = seasonsData?.seasons || [];
-        if (!seasons.length) return;
-
-        // Use the most recent season
-        const latestSeason = seasons[0];
-        const seasonId = latestSeason?.id;
-        if (!seasonId) return;
-
-        // Get standings for this season
-        const standData = await sofaGet(`/tournaments/get-standings?uniqueTournamentId=${tid}&seasonId=${seasonId}`);
-        const tables = standData?.standings || [];
-
-        for (const table of tables) {
-          const rows = table?.rows || [];
-          for (const row of rows) {
-            const teamName = row?.team?.name || "";
-            const teamShort = row?.team?.shortName || teamName;
-            const key = teamName.toLowerCase();
-            const keyShort = teamShort.toLowerCase();
-
-            // Only add if not already in map from football-data.org
-            if (!standingsMap[key] && !standingsMap[keyShort]) {
-              const stats = {
-                position: row?.position || 10,
-                played:   row?.matches || row?.played || 30,
-                won:      row?.wins || row?.won || 12,
-                drawn:    row?.draws || row?.drawn || 7,
-                lost:     row?.losses || row?.lost || 11,
-                gf:       row?.scoresFor || row?.goalsFor || 40,
-                ga:       row?.scoresAgainst || row?.goalsAgainst || 40,
-                gd:       (row?.scoresFor || 40) - (row?.scoresAgainst || 40),
-                points:   row?.points || 43,
-                form:     [],
-                source:   "sofascore",
-              };
-              standingsMap[key]      = stats;
-              standingsMap[keyShort] = stats;
-            }
-          }
-        }
-      } catch(e) {
-        // Silent fail — fallback stats will be used
-      }
-    }));
-
-    console.log(`Total teams with stats: ${Object.keys(standingsMap).length / 2}`);
-
-    // ── 4. LIVE ODDS ──────────────────────────────────────────────
+    // ── 3. LIVE ODDS ──────────────────────────────────────────────
     let oddsData = [];
     try {
       const oddsRes = await fetch(
         `${ODDS_BASE}/sports/soccer/odds/?apiKey=${ODDS_KEY}&regions=uk,eu&markets=h2h,totals,btts&oddsFormat=decimal&dateFormat=iso`
       );
-      if (oddsRes.ok) oddsData = await oddsRes.json();
-      console.log(`Odds: ${oddsData.length} events`);
+      if (oddsRes.ok) {
+        oddsData = await oddsRes.json();
+        console.log(`Odds events: ${oddsData.length}`);
+      } else {
+        const errText = await oddsRes.text();
+        console.log(`Odds error ${oddsRes.status}: ${errText.slice(0,100)}`);
+      }
     } catch(e) {
-      console.log("Odds unavailable:", e.message);
+      console.log("Odds failed:", e.message);
     }
 
     function norm(n) {
@@ -264,13 +202,12 @@ exports.handler = async function(event, context) {
       return out;
     }
 
-    // ── 5. ENRICH FIXTURES ────────────────────────────────────────
+    // ── 4. ENRICH ─────────────────────────────────────────────────
     const enriched = fixtures.map(f => {
       const homeStats = standingsMap[f.homeFull.toLowerCase()] ||
                         standingsMap[f.home.toLowerCase()] || null;
       const awayStats = standingsMap[f.awayFull.toLowerCase()] ||
                         standingsMap[f.away.toLowerCase()] || null;
-
       const oddsEvent = findOdds(f.homeFull || f.home, f.awayFull || f.away);
       const liveOdds  = extractOdds(oddsEvent);
 
@@ -303,14 +240,13 @@ exports.handler = async function(event, context) {
           withOdds:  enriched.filter(m => m.hasOdds).length,
           withStats: enriched.filter(m => m.hasStats).length,
           oddsEvents: oddsData.length,
-          teamsWithStats: Object.keys(standingsMap).length / 2,
           source: "sofascore+football-data+odds-api",
         }
       }),
     };
 
   } catch (error) {
-    console.error("Handler error:", error.message);
+    console.error("Error:", error.message);
     return {
       statusCode: 500,
       headers,
