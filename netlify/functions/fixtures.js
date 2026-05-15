@@ -126,12 +126,9 @@ exports.handler = async function(event, context) {
 
     // ── 4. LIVE STANDINGS ─────────────────────────────────────────
     const standingsMap = {};
-    // Try current season standings, fall back to previous if empty
     await Promise.allSettled(FD_COMPS.map(async code => {
-      let data = await fdGet(`/competitions/${code}/standings?season=2025`);
-      if (!data || !data.standings?.[0]?.table?.length) {
-        data = await fdGet(`/competitions/${code}/standings?season=2024`);
-      }
+      // No season filter - let football-data.org return current season automatically
+      const data = await fdGet(`/competitions/${code}/standings`);
       if (!data) return;
       const table = data.standings?.[0]?.table || [];
       table.forEach(entry => {
